@@ -9,7 +9,7 @@ import comp512.utils.*;
 import java.io.*;
 import java.util.logging.*;
 import java.net.UnknownHostException;
-
+import java.lang.Math.*;
 
 // ANY OTHER classes, etc., that you add must be private to this package and not visible to the application layer.
 
@@ -18,17 +18,34 @@ import java.net.UnknownHostException;
 //		You should also not change the signature of these methods (arguments and return value) other aspects maybe changed with reasonable design needs.
 public class Paxos
 {
-	GCL gcl;
-	FailCheck failCheck;
+	GCL m_gcl;
+	FailCheck m_failCheck;
+	public int m_moveNum;
+	public int
+	public final int m_numProcesses;
+	public final double m_majorityNum;
 
-	public Paxos(String myProcess, String[] allGroupProcesses, Logger logger, FailCheck failCheck) throws IOException, UnknownHostException
+	public Paxos(String p_myProcess, String[] p_allGroupProcesses, Logger p_logger, FailCheck p_failCheck) throws IOException, UnknownHostException, IllegalArgumentException
 	{
 		// Rember to call the failCheck.checkFailure(..) with appropriate arguments throughout your Paxos code to force fail points if necessary.
-		this.failCheck = failCheck;
+		this.m_failCheck = p_failCheck;
+
+		if (!(validateProcessString(p_myProcess))){
+			throw new IllegalArgumentException("Invalid process string: " + p_myProcess);
+		}
+
+		for (String group_process : p_allGroupProcesses){
+			if (!(validateProcessString(group_process))){
+				throw new IllegalArgumentException("Invalid process string: " + group_process);
+			}
+		}
 
 		// Initialize the GCL communication system as well as anything else you need to.
-		this.gcl = new GCL(myProcess, allGroupProcesses, null, logger) ;
+		this.m_gcl = new GCL(p_myProcess, p_allGroupProcesses, null, p_logger);
 
+		this.m_moveNum = 1;
+		this.m_numProcesses = p_allGroupProcesses.length + 1;
+		this.m_majorityNum = Math.ceil(m_numProcesses / 2);
 	}
 
 	// This is what the application layer is going to call to send a message/value, such as the player and the move
@@ -53,6 +70,35 @@ public class Paxos
 	public void shutdownPaxos()
 	{
 		gcl.shutdownGCL();
+	}
+
+	private boolean validateProcessString(String p_processString) throws NumberFormatException{
+		if (p_processString == null || p_processString.isEmpty()) {
+			return false;
+		}
+
+		String[] parts = p_processString.split(":");
+		if (parts.length != 2) {
+			return false;
+		}
+
+		String hostname = parts[0].trim();
+		String portStr = parts[1].trim();
+
+		if (hostname.isEmpty()) {
+			return false;
+		}
+
+		try {
+			int port = Integer.parseInt(portStr);
+			if (port < 1 || port > 65535) {
+				return false;
+			}
+		} catch (NumberFormatException e) {
+			return false;
+		}
+
+		return true;
 	}
 }
 

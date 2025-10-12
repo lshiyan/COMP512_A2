@@ -1,0 +1,5 @@
+#Logfiles 
+*.log 
+
+#Compiled binaries
+*.class
