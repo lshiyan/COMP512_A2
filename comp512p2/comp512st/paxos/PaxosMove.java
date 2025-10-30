@@ -3,29 +3,41 @@ package comp512st.paxos;
 enum PaxosMove {
     LEFT, RIGHT, UP, DOWN, SHUTDOWN;
 
-    @Override
-    public String toString() {
-        return name();
-    }
-
-    public static PaxosMove fromString(String value) {
+    static PaxosMove fromChar(Character value) {
         if (value == null) {
             throw new IllegalArgumentException("Value cannot be null");
         }
 
-        switch (value.toLowerCase()) {
-            case "left":
+        switch (value) {
+            case 'L':
                 return LEFT;
-            case "right":
+            case 'R':
                 return RIGHT;
-            case "up":
+            case 'U':
                 return UP;
-            case "down":
+            case 'D':
                 return DOWN;
-            case "shutdown":
+            case 'E':
                 return SHUTDOWN;
             default:
                 throw new IllegalArgumentException("Unknown PaxosMove: " + value);
+        }
+    }
+
+    char getChar() {
+        switch (this) {
+            case LEFT:
+                return 'L';
+            case RIGHT:
+                return 'R';
+            case UP:
+                return 'U';
+            case DOWN:
+                return 'D';
+            case SHUTDOWN:
+                return 'E';
+            default:
+                throw new IllegalStateException("Unexpected PaxosMove: " + this);
         }
     }
 }

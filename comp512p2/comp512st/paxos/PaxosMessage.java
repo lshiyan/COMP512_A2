@@ -1,49 +1,144 @@
 package comp512st.paxos;
 
 import java.io.Serializable;
-import java.util.Vector;
 
-class PaxosMessage implements Serializable{
+abstract class PaxosMessage implements Serializable {
+    protected int m_moveNum;
+    protected int m_playerNum;
 
-    private PaxosMessageType m_messageType;
-    private Vector<String> m_args;
-
-    public PaxosMessage(PaxosMessageType p_messageType, Vector<String> p_messageArgs) throws IllegalArgumentException {
-        m_messageType = p_messageType;
-        m_args = p_messageArgs;
-
-        if (!validateArgLength()){
-            throw new IllegalArgumentException("Incorrect number of arguments for given message type.");
-        }
-
+    PaxosMessage(int p_moveNum, int p_playerNum) {
+        m_moveNum = p_moveNum;
+        m_playerNum = p_playerNum;
     }
 
-    public PaxosMessageType getMessageType(){
-        return m_messageType;
+    int getMoveNum() {
+        return m_moveNum;
     }
 
-    public Vector<String> getArgs(){
-        return m_args;
+    int getPlayerNum() {
+        return m_playerNum;
+    }
+}
+
+class ProposeMessage extends PaxosMessage {
+    private float m_ballot;
+
+    ProposeMessage(int p_moveNum, int p_playerNum, float p_ballotID) {
+        super(p_moveNum, p_playerNum);
+        m_ballot = p_ballotID;
     }
 
-     public boolean validateArgLength(){
-        switch (m_messageType){
-            case PaxosMessageType.PROPOSE: //[Proposer process, moveNum, ballotID]
-                return m_args.size() == 3;
-            case PaxosMessageType.REFUSE: //[Proposer process, moveNum, ballotID]
-                return m_args.size() == 3;
-            case PaxosMessageType.PROMISE: //[Proposer process, moveNum, ballotID, <lastAcceptedBallotID>, <lastAcceptedMove>]
-                return m_args.size() == 3 || m_args.size() == 5; 
-            case PaxosMessageType.ACCEPT: //[Proposer process, moveNum, ballotID, moveToAccept]
-                return m_args.size() == 4; 
-            case PaxosMessageType.ACCEPTACK: //[Proposer process, moveNum, ballotID, moveToAccept]
-                return m_args.size() == 4;
-            case PaxosMessageType.ACCEPTNACK: //[Proposer process, moveNum, ballotID, moveToAccept]
-                return m_args.size() == 4;
-            case PaxosMessageType.CONFIRM: //[Proposer process, moveNum, ballotID]
-                return m_args.size() == 3;
-            default:
-                return false;
-        }
+    float getBallotID() {
+        return m_ballot;
     }
+}
+
+class PromiseMessage extends PaxosMessage {
+    private float m_ballot;
+    private float m_acceptedBallot;
+    private PaxosMove m_acceptedMove;
+    private int m_acceptedPlayer;
+
+    PromiseMessage(int p_moveNum, int p_playerNum, float p_ballotID, int p_acceptedPlayer, PaxosMove p_acceptedMove, float p_acceptedBallot) {
+        super(p_moveNum, p_playerNum);
+        m_ballot = p_ballotID;
+        m_acceptedBallot = p_acceptedBallot;
+        m_acceptedMove = p_acceptedMove;
+        m_acceptedPlayer = p_acceptedPlayer;
+    }
+
+    float getBallotID() {
+        return m_ballot;
+    }
+
+    float getAcceptedBallot() {
+        return m_acceptedBallot;
+    }
+
+    PaxosMove getAcceptedMove() {
+        return m_acceptedMove;
+    }
+
+    int getLastAcceptedPlayer(){
+        return m_acceptedPlayer;
+    }
+}
+
+class RefuseMessage extends PaxosMessage {
+    private float m_highestBallot;
+
+    RefuseMessage(int p_moveNum, int p_playerNum, float p_highestBallot) {
+        super(p_moveNum, p_playerNum);
+        m_highestBallot = p_highestBallot;
+    }
+
+    float getBallotID() {
+        return m_highestBallot;
+    }
+}
+
+class AcceptMessage extends PaxosMessage {
+    private float m_ballot;
+    private PaxosMove m_move;
+
+    AcceptMessage(int p_moveNum, int p_playerNum, float p_ballotID, PaxosMove p_move) {
+        super(p_moveNum, p_playerNum);
+        m_ballot = p_ballotID;
+        m_move = p_move;
+    }
+
+    PaxosMove getMove() {
+        return m_move;
+    }
+
+    float getBallotID() {
+        return m_ballot;
+    }
+}
+
+class AckMessage extends PaxosMessage {
+    private float m_ballot;
+
+    AckMessage(int p_moveNum, int p_playerNum, float p_ballotID) {
+        super(p_moveNum, p_playerNum);
+        m_ballot = p_ballotID;
+    }
+
+    float getBallotID() {
+        return m_ballot;
+    }
+}
+
+class RejectMessage extends PaxosMessage {
+    private float m_highestBallot;
+
+    RejectMessage(int p_moveNum, int p_playerNum, float p_highestBallot) {
+        super(p_moveNum, p_playerNum);
+        m_highestBallot = p_highestBallot;
+    }
+
+    float getBallotID() {
+        return m_highestBallot;
+    }
+}
+
+class ConfirmMessage extends PaxosMessage {
+    private PaxosMove m_confirmedMove;
+
+    ConfirmMessage(int p_moveNum, int p_playerNum, PaxosMove p_move) {
+        super(p_moveNum, p_playerNum);
+        m_confirmedMove = p_move;
+    }
+
+    PaxosMove getConfirmedMove() {
+        return m_confirmedMove;
+    }
+}
+
+class ShutdownMessage extends PaxosMessage {
+
+    ShutdownMessage(int p_playerNum){
+        super(-1, p_playerNum);
+    }
+    
 }

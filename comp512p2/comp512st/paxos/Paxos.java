@@ -4,428 +4,480 @@ package comp512st.paxos;
 import comp512.gcl.*;
 
 import comp512.utils.*;
+import comp512.utils.FailCheck.FailureType;
 
 // Any other imports that you may need.
 import java.io.*;
-import java.util.Queue;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
-import java.util.Vector;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.logging.*;
 import java.net.UnknownHostException;
-import java.sql.Time;
-import java.lang.Math.*;
+
 
 // ANY OTHER classes, etc., that you add must be private to this package and not visible to the application layer.
 
 // extend / implement whatever interface, etc. as required.
 // NO OTHER public members / methods allowed. broadcastTOMsg, acceptTOMsg, and shutdownPaxos must be the only visible methods to the application layer.
 //		You should also not change the signature of these methods (arguments and return value) other aspects maybe changed with reasonable design needs.
+
+class DecidedMove {
+    private final int m_playerNum;
+    private final PaxosMove m_decidedMove;
+
+    DecidedMove(int p_playerNum, PaxosMove p_decidedMove) {
+        m_playerNum = p_playerNum;
+        m_decidedMove = p_decidedMove;
+    }
+
+    int getPlayerNum() {
+        return m_playerNum;
+    }
+
+    PaxosMove getDecidedMove() {
+        return m_decidedMove;
+    }
+}
+
 public class Paxos
 {
 	FailCheck m_failCheck;
+	Logger m_logger;
+	private int m_playerNum; 
 
-	private ConcurrentLinkedQueue<PaxosMove> m_moveQueue; //Queue that stores the moves in total order.
+	private ConcurrentLinkedDeque<PaxosMove> m_moveQueue = new ConcurrentLinkedDeque<>(); //Queue that stores the moves that are yet to be broadcast.
+	private ConcurrentHashMap<Integer, DecidedMove> m_deliveryMap = new ConcurrentHashMap<>(); //Maps slot numbers to <proposer process, decided move> at that slot.
 
 	private final int m_numProcesses; //Number of total player processes.
 	private final double m_majorityNum; //Number of processed required to meet majority.
-	private final long m_maxTimeout = 10000; //10 seconds.
-	private final String m_processString; //Process name of our current process.
-	private int m_moveNum; //Current move we're proposing for
+	private final long m_maxTimeout = 1000; //1 seconds.
+	private int m_proposalSlot; //Next move to propose.
+	private int m_deliverSlot; //Next move to deliver.
 
-	//Fields for the proposer code.
-	private float m_lastProposedBallotID; //Last ballot ID proposed.
+	private ConcurrentHashMap<Integer, PaxosMoveState> m_moveStateMap = new ConcurrentHashMap<>(); //Stores state for each move number.
+	private volatile boolean m_running = true; //False when shutdown is enabled. The volatile keyword allows the change to be instantly seen by threads.
 
-	//Fields for the acceptor code.
-	private PaxosMove m_previousAcceptedMove = null;
+	//Store threads to interrupt on shutdown.
+	private Thread m_proposerThread;
+	private Thread m_listenerThread;
 
 	GCL m_gcl;
 
-	public Paxos(String p_myProcess, String[] p_allGroupProcesses, Logger p_logger, FailCheck p_failCheck) throws IOException, UnknownHostException, IllegalArgumentException
+	public Paxos(String p_myProcess, String[] p_allGroupProcesses, Logger p_logger, FailCheck p_failCheck) throws InterruptedException, IOException, UnknownHostException, IllegalArgumentException
 	{
+		this.m_logger = p_logger;
+		
 		// Rember to call the failCheck.checkFailure(..) with appropriate arguments throughout your Paxos code to force fail points if necessary.
 		this.m_failCheck = p_failCheck;
 
-		if (!(validateProcessString(p_myProcess))){
-			throw new IllegalArgumentException("Invalid process string: " + p_myProcess);
-		}
+		// Initialize the GCL communication system as well as anything else you need to.
+		this.m_gcl = new GCL(p_myProcess, p_allGroupProcesses, null, p_logger);
+		m_logger.info("Initialized GCL for process: " + p_myProcess + " with group: " + Arrays.toString(p_allGroupProcesses));
 
-		for (String group_process : p_allGroupProcesses){
-			if (!(validateProcessString(group_process))){
-				throw new IllegalArgumentException("Invalid process string: " + group_process);
+		this.m_proposalSlot = 1;
+		this.m_deliverSlot = 1;
+		m_numProcesses = p_allGroupProcesses.length;
+		m_majorityNum = Math.ceil(m_numProcesses / 2.0);
+		m_playerNum = 0;
+		
+		for (int i = 0; i < p_allGroupProcesses.length; i++){
+			if (p_allGroupProcesses[i].equals(p_myProcess)){
+				m_playerNum = i+1;
+				break;
 			}
 		}
 
-		// Initialize the GCL communication system as well as anything else you need to.
-		this.m_gcl = new GCL(p_myProcess, p_allGroupProcesses, null, p_logger);
-
-		this.m_moveNum = 1;
-		m_numProcesses = p_allGroupProcesses.length + 1;
-		m_majorityNum = Math.ceil(m_numProcesses / 2);
-		m_processString = p_myProcess;
 		startListenerThread();
+		startProposerThread();
 	}
 
-	// This is what the application layer is going to call to send a message/value, such as the player and the move
 	public void broadcastTOMsg(Object val)
 	{
-		// This is just a place holder.
-		// Extend this to build whatever Paxos logic you need to make sure the messaging system is total order.
-		// Here you will have to ensure that the CALL BLOCKS, and is returned ONLY when a majority (and immediately upon majority) of processes have accepted the value.
-		//gcl.broadcastMsg(val);
-		m_proposer.propose();
+		Object[] moveArr = (Object[]) val; 
+
+		int playerNum = (Integer) moveArr[0];
+		PaxosMove nextMove = PaxosMove.fromChar((Character) moveArr[1]);
+
+		if (playerNum == m_playerNum){
+			m_moveQueue.add(nextMove);
+		}
 	}
 
-	// This is what the application layer is calling to figure out what is the next message in the total order.
-	// Messages delivered in ALL the processes in the group should deliver this in the same order.
+
+	//Waits until the map entry at the current move number is not null, then retrieves it.
 	public Object acceptTOMsg() throws InterruptedException
 	{
-		while (m_moveQueue.isEmpty()){
+		while (m_deliveryMap.get(m_deliverSlot) == null){
 			Thread.sleep(500);
 		}
 
-		PaxosMove nextMove = m_moveQueue.poll();
-		m_moveNum += 1;
-		return nextMove;
+		DecidedMove nextMove = m_deliveryMap.get(m_deliverSlot);
+
+		Character returnChar = nextMove.getDecidedMove().getChar();
+		int playerNum = nextMove.getPlayerNum();
+
+		m_deliverSlot += 1;
+
+		Object[] return_arr = new Object[2];
+
+		return_arr[0] = playerNum;
+		return_arr[1] = returnChar;
+
+		return return_arr;
 	}
 
 	// Add any of your own shutdown code into this method.
 	public void shutdownPaxos()
 	{
-		gcl.shutdownGCL();
+		m_running = false;
+
+        if (m_listenerThread != null) {
+            m_listenerThread.interrupt();
+        }
+        if (m_proposerThread != null) {
+            m_proposerThread.interrupt();
+        }
+
+		ShutdownMessage shutdownMessage = new ShutdownMessage(m_playerNum);
+		m_gcl.broadcastMsg(shutdownMessage);
+		m_gcl.shutdownGCL();
 	}
 
-	public void startListenerThread(){
-		new Thread(() -> {
+	private void startListenerThread(){
+		Thread listenerThread = new Thread(() -> {
 			try{
-				while (true){
-					PaxosMessage paxosMessage = (PaxosMessage) m_gcl.readGCMessage().val;
+				while (m_running){
+					GCMessage gcMsg = m_gcl.readGCMessage();
+					Object msg = gcMsg.val;
 
-					switch(paxosMessage.getMessageType()){
-						case PROPOSE:
-							handleProposeMessage(paxosMessage);
-						case PROMISE:
-							handlePromiseMessage(paxosMessage);
-						case ACCEPT:
-							handleAcceptMessage(paxosMessage);
-						case ACCEPTACK:
-							handleAcceptAckMessage(paxosMessage);
-						case CONFIRM:
-							handleConfirmMessage(paxosMessage);
+					if (msg instanceof ProposeMessage) {
+						handleProposeMessage((ProposeMessage) msg, gcMsg.senderProcess);
+					} 
+					else if (msg instanceof PromiseMessage) {
+						handlePromiseMessage((PromiseMessage) msg, gcMsg.senderProcess);
+					} 
+					else if (msg instanceof RefuseMessage) {
+						handleRefuseMessage((RefuseMessage) msg);
+					} 
+					else if (msg instanceof AcceptMessage) {
+						handleAcceptMessage((AcceptMessage) msg, gcMsg.senderProcess);
+					} 
+					else if (msg instanceof AckMessage) {
+						handleAcceptAckMessage((AckMessage) msg, gcMsg.senderProcess);
+					} 
+					else if (msg instanceof RejectMessage) {
+						handleRejectMessage((RejectMessage) msg);
+					} 
+					else if (msg instanceof ConfirmMessage) {
+						handleConfirmMessage((ConfirmMessage) msg);
+					}
+					else if (msg instanceof ShutdownMessage){
+						shutdownPaxos();;
 					}
 				}
 			}
 			catch (InterruptedException e){
-				e.printStackTrace();
+				Thread.currentThread().interrupt();
 			}
-		}).start();
+		});
+
+		m_listenerThread = listenerThread;
+		listenerThread.start();
 	}
 
-	public boolean validatePaxosMessage(PaxosMessage)
-	public void handleProposeMessage(PaxosMessage p_proposeMessage){
-		if (validatePaxosMessage(p_proposeMessage){
-
-		}
-	}
-
-	public void handlePromiseMessage(PaxosMessage p_promiseMessage){
-
-	}
-
-	public void handleAcceptMessage(PaxosMessage p_acceptMessage){
-
-	}
-
-	public void handleAcceptAckMessage(PaxosMessage p_acceptAckMessage){
-
-	}
-
-	public void handleConfirmMessage(PaxosMessage p_confirmMessage){
-
-	}
-
-	private boolean validateProcessString(String p_processString) throws NumberFormatException{
-		if (p_processString == null || p_processString.isEmpty()) {
-			return false;
-		}
-
-		String[] parts = p_processString.split(":");
-		if (parts.length != 2) {
-			return false;
-		}
-
-		String hostname = parts[0].trim();
-		String portStr = parts[1].trim();
-
-		if (hostname.isEmpty()) {
-			return false;
-		}
-
-		try {
-			int port = Integer.parseInt(portStr);
-			if (port < 1 || port > 65535) {
-				return false;
-			}
-		} catch (NumberFormatException e) {
-			return false;
-		}
-
-		return true;
-	}
-
-	//Validates each paxos message. Does not check anything about ballotID.
-	private boolean validatePaxosMessage(PaxosMessage p_paxosMessage){
-		PaxosMessageType type = p_paxosMessage.getMessageType();
-
-		Vector<String> args = p_paxosMessage.getArgs();
-
-		if (!(p_paxosMessage.validateArgLength())){
-			return false;
-		}
-
-		String processString = args.get(0);
-		int moveNum = Integer.valueOf(args.get(1));
-
-		if (!(processString.equals(m_processString)) || moveNum != m_moveNum){
-			return false;
-		}
-
-		switch(type){
-
-			case PROMISE:
-				float ballotID = Float.valueOf(args.get(2));
-
-				if (!ballotID == m_lastProposedBallotID){
-
-				}
-
-		}
-
-		return true;
-	}
-	//Generates a random ballotID based on the current moveNum from a U(0,1) distribution, rounded to 2 decimal places. I.e. if m_moveNum = 2, then this will output 2.31, 2.93, etc.
-	private float generateBallotID(){
-		Random rand = new Random();
-
-		float fractional = rand.nextFloat();
-
-		return m_moveNum + fractional;
-	}
-
-	// Generates a propose message with a random ballotID.
-	private PaxosMessage generateProposeMessage(float candidateID){
-		Vector<String> args = new Vector<>();
-		args.add(m_processString);
-		args.add(String.valueOf(m_moveNum));
-		args.add(String.valueOf(candidateID));
-
-		PaxosMessage candidateProposeMessage = new PaxosMessage(PaxosMessageType.PROPOSE, args);
-
-		return candidateProposeMessage;
-	}
-
-	/*class PaxosProposer {
-
-		
-
-		public PaxosProposer(int p_numProcesses, double p_majorityNum, GCL p_gcl, String p_processString){
-			m_numProcesses = p_numProcesses;
-			m_majorityNum = p_majorityNum;
-			m_moveNum = 1;
-			m_gcl = p_gcl;
-			m_processString = p_processString;
-		}
-
-		//Generates a random ballotID based on the current moveNum from a U(0,1) distribution, rounded to 2 decimal places. I.e. if m_moveNum = 2, then this will output 2.31, 2.93, etc.
-		private float generateBallotID(){
-			Random rand = new Random();
-
-			float fractional = rand.nextFloat();
-
-			return m_moveNum + fractional;
-		}
-
-		// Generates a propose message with a random ballotID.
-		private PaxosMessage generateProposeMessage(float candidateID){
-			Vector<String> args = new Vector<>();
-			args.add(m_processString);
-			args.add(String.valueOf(m_moveNum));
-			args.add(String.valueOf(candidateID));
-
-			PaxosMessage candidateProposeMessage = new PaxosMessage(PaxosMessageType.PROPOSE, args);
-
-			return candidateProposeMessage;
-		}
-
-		//Validates that a promise message is indeed for the specific move number and ballotID that was sent.
-		private boolean validatePromiseMessage(PaxosMessage p_promiseMessage, float p_candidateID){
-			PaxosMessageType type = p_promiseMessage.getMessageType();
-
-			if (!(type.equals(PaxosMessageType.PROMISE))){
-				return false;
-			}
-
-			Vector<String> args = p_promiseMessage.getArgs();
-
-			if (!(p_promiseMessage.validateArgLength())){
-				return false;
-			}
-
-			String processString = args.get(0);
-			int moveNum = Integer.valueOf(args.get(1));
-			float promisedID = Float.valueOf(args.get(1));
-
-			if (!(processString.equals(m_processString)) || moveNum != m_moveNum || promisedID != p_candidateID){
-				return false;
-			}
-
-			return true;
-		}
-
-		//Broadcasts proposal message, returns true if proposal succeeded.
-		public boolean propose(){
-			float candidateID = generateBallotID();
-			PaxosMessage proposeMessage = generateProposeMessage(candidateID);
-			m_lastProposedBallotID = candidateID;
-
-			m_gcl.broadcastMsg(proposeMessage);
-			boolean proposalSucceeded = listenForPromises();
-
-			return proposalSucceeded;
-		}
-
-		public boolean listenForPromises(){
-
-			int counter = 0;
-			boolean proposalSucceeded = false;
-			long startTime = System.currentTimeMillis();
-
-			while (true){
-
-				if (System.currentTimeMillis() - startTime > m_maxTimeout) {
-					break;
-				}
-
-				PaxosMessage promiseMessage = (PaxosMessage) m_gcl.readGCMessage().val;
-
-				if (validatePromiseMessage(promiseMessage, m_lastProposedBallotID)){
-					counter += 1;
-					if (counter == m_majorityNum){
-						proposalSucceeded = true;
-					}
-				}
-			}
-
-			return proposalSucceeded;
-		}
-	}
-
-	class PaxosAcceptor {
- 
-		private float m_maxBallotID;
-		private float m_maxAcceptID;
-		private PaxosMove m_acceptedMove;
-		private PaxosMove m_confirmedMove;
-		private int m_moveNum;
-		private GCL m_gcl;
-
-		public PaxosAcceptor(GCL p_gcl){
-			m_maxBallotID = -1;
-			m_maxAcceptID = -1;
-			m_acceptedMove = null;
-			m_gcl = p_gcl;
-			m_moveNum = 1;
-		}
-
-		//Validates whether a recieved message is a valid Paxos message that corresponds to this move number. DOES NOT check if the ballotID is valid.
-		private boolean validatePaxosMessage(PaxosMessage p_paxosMessage){
-			PaxosMessageType type = p_paxosMessage.getMessageType();
-
-			Vector<String> args = p_paxosMessage.getArgs();
-
-			if (!(p_paxosMessage.validateArgLength())){
-				return false;
-			}
-
-			Vector<String> messageArgs = p_paxosMessage.getArgs();
-			int moveNum = Integer.valueOf(messageArgs.get(1));
-
-			if (moveNum != m_moveNum){
-				return false;
-			}
-
-			return true;
-		}
-
-		//Starts a thread that continually listens for messages and handles accordingly.
-		public void startListenerThread(){
-			new Thread(()->{
-
-				while (true){
-					PaxosMessage paxosMessage = m_gcl.readGCMessage().val;
-
-					if (validatePaxosMessage(paxosMessage)){
-
-						Vector<String> args = paxosMessage.getArgs();
-						String proposerProcess = args.get(0);
-						float candidateID = Float.valueOf(args.get(2));
-
-						switch(paxosMessage.getMessageType()){
-
-							case PaxosMessageType.PROMISE:
-
-								if (!(candidateID > m_maxBallotID)){
-									Vector<String> refuseMessageArgs = new Vector<>(args);
-									PaxosMessage refuseMessage = new PaxosMessage(PaxosMessageType.REFUSE, refuseMessageArgs);
-									m_gcl.sendMsg(refuseMessage, proposerProcess);
-								}
-								else{
-									Vector<String> promiseMessageArgs = new Vector<>(args);
-									if (!(m_acceptedMove.equals(null))){
-										promiseMessageArgs.add(String.valueOf(m_maxAcceptID));
-										promiseMessageArgs.add(m_acceptedMove.toString());
-									}
-									PaxosMessage promiseMessage = new PaxosMessage(PaxosMessageType.PROMISE, promiseMessageArgs);
-									m_gcl.sendMsg(promiseMessage, proposerProcess);
-									m_maxBallotID = candidateID;
-								}
-						
-							case PaxosMessageType.ACCEPT:
-								
-								if (candidateID == m_maxBallotID){
-									m_acceptedMove = PaxosMove.fromString(args.get(3));
-									m_maxAcceptID = candidateID;
-
-									Vector<String> acceptAckMessageArgs = new Vector<>(args);
-									PaxosMessage acceptAckMessage = new PaxosMessage(PaxosMessageType.ACCEPTACK, acceptAckMessageArgs);
-									m_gcl.sendMsg(acceptAckMessage, proposerProcess);
-								}
-								else{
-									Vector<String> acceptAckMessageArgs = new Vector<>(args);
-									PaxosMessage acceptNackMessage = new PaxosMessage(PaxosMessageType.ACCEPTNACK, acceptAckMessageArgs);
-									m_gcl.sendMsg(acceptNackMessage, proposerProcess);
-								}
-
-							case PaxosMessageType.CONFIRM:
-
-								if (candidateID == m_maxAcceptID){
-									m_confirmedMove = PaxosMove.fromString(args.get(3));
-									m_maxAcceptID = candidateID;
-
-									Vector<String> acceptAckMessageArgs = new Vector<>(args);
-									PaxosMessage acceptAckMessage = new PaxosMessage(PaxosMessageType.ACCEPTACK, acceptAckMessageArgs);
-									m_gcl.sendMsg(proposerProcess);
-								}
-								else{
-									Vector<String> acceptAckMessageArgs = new Vector<>(args);
-									PaxosMessage acceptNackMessage = new PaxosMessage(PaxosMessageType.ACCEPTNACK, acceptAckMessageArgs);
-									m_gcl.sendMsg(proposerProcess);
-								}
+	private void startProposerThread() throws InterruptedException{
+		Thread proposerThread= new Thread(() -> {
+			try{
+				while (m_running){
+
+					if (!(m_moveQueue.isEmpty())){
+						PaxosMove nextMove = m_moveQueue.peek();
+
+						m_logger.info("Attempting to propose move: " + nextMove + " from player " + m_playerNum);
+
+						int slotNum = m_proposalSlot;
+
+						if (m_deliveryMap.get(slotNum) != null){
+							m_logger.info("Slot " + slotNum + " has already been decided.");
+							m_proposalSlot += 1;
+							continue;
+						}
+
+						if (runPaxos(nextMove, slotNum)){
+							m_logger.info("Slot " + slotNum + "has been decided by process " + m_playerNum);
+							m_proposalSlot += 1;
+							m_moveQueue.poll();
+						}
+						else{
+							Thread.sleep(50);
 						}
 					}
+					else{
+						Thread.sleep(100);
+					}
 				}
-			}).start();
+			}
+			catch(InterruptedException e){
+				Thread.currentThread().interrupt();
+			}
+		});
+
+		m_proposerThread = proposerThread;
+		proposerThread.start();
+	}
+
+	//Starts paxos round with given move and random ballot ID. Returns true if successful installment was made by this process.
+	private boolean runPaxos(PaxosMove p_paxosMove, Integer p_moveNum) throws InterruptedException{
+
+		PaxosMoveState moveState = getMoveState(p_moveNum);
+		moveState.reset(); //Reset the move state if this is a retry.
+
+		float ballotID = generateBallotID(p_moveNum);
+		PaxosMessage proposeMessage = new ProposeMessage(p_moveNum, m_playerNum, ballotID);
+		moveState.setProposedBallot(ballotID);
+		m_gcl.broadcastMsg(proposeMessage);
+
+		m_failCheck.checkFailure(FailureType.AFTERSENDPROPOSE);
+
+		long promiseStart = System.currentTimeMillis();
+
+		PaxosMove chosenMove = p_paxosMove;
+		int chosenPlayer = m_playerNum;
+
+		while (System.currentTimeMillis() - promiseStart < m_maxTimeout) {
+
+			//If there was a refuse message received, early terminate.
+			if (moveState.getRefuseMessageReceived()){
+				return false;
+			}
+			List<PromiseMessage> promiseList = moveState.getPromiseMessageList();
+
+			if (promiseList.size() >= m_majorityNum) {
+
+				m_failCheck.checkFailure(FailureType.AFTERBECOMINGLEADER);
+
+				PaxosMove previouslyChosenMove = getChosenMove(promiseList);
+
+				//If there was a previously accepted move, add the currently proposed move to the head of the queue. Set the chosen move and chosen player accordingly.
+				if (previouslyChosenMove != null){
+					m_moveQueue.addFirst(p_paxosMove);
+					chosenMove = previouslyChosenMove;
+					chosenPlayer = getChosenPlayer(promiseList);
+				}
+
+				AcceptMessage acceptMsg = new AcceptMessage(p_moveNum, chosenPlayer, ballotID, chosenMove);
+				m_gcl.broadcastMsg(acceptMsg);
+
+				long acceptStart = System.currentTimeMillis();
+
+				while (System.currentTimeMillis() - acceptStart < m_maxTimeout) {
+					//If there was a reject message received, early terminate.
+					if (moveState.getRejectMessageReceived()){
+						return false;
+					}
+					List<AckMessage> ackList = moveState.getAcceptAckMessageList();
+
+					if (ackList.size() >= m_majorityNum) {
+
+						m_failCheck.checkFailure(FailureType.AFTERVALUEACCEPT);
+
+						ConfirmMessage confirmMsg = new ConfirmMessage(p_moveNum, chosenPlayer, chosenMove);
+						m_gcl.broadcastMsg(confirmMsg);
+						
+						return true;
+					}
+					Thread.sleep(50);
+				}
+
+				return false;
+			}
+			
+			Thread.sleep(50);  
+    	}
+
+		return false;
+	}
+
+	//Handles the propose message on the acceptor side.
+	private void handleProposeMessage(ProposeMessage p_proposeMessage, String p_senderProcess){
+
+		m_failCheck.checkFailure(FailureType.RECEIVEPROPOSE);
+
+		int moveNum = p_proposeMessage.getMoveNum();
+		PaxosMoveState moveState = getMoveState(moveNum);
+
+		float ballotID = p_proposeMessage.getBallotID();
+
+		if (ballotID > moveState.getMaxBallotSeen()){
+			moveState.setMaxBallotSeen(ballotID);
+			PaxosMove lastAcceptedMove = moveState.getAcceptedMove();
+			float lastAcceptedBallot = moveState.getAcceptedBallot();
+			int lastAcceptedPlayer = moveState.getLastAcceptedPlayer();
+			PromiseMessage promiseMessage = new PromiseMessage(moveNum, m_playerNum, ballotID, lastAcceptedPlayer, lastAcceptedMove, lastAcceptedBallot);
+			m_gcl.sendMsg(promiseMessage, p_senderProcess);
 		}
-	}*/
+		else{
+			RefuseMessage refuseMessage = new RefuseMessage(moveNum, m_playerNum, ballotID);
+			m_gcl.sendMsg(refuseMessage, p_senderProcess);
+		}
+
+		m_failCheck.checkFailure(FailureType.AFTERSENDVOTE);
+	}
+
+	//Handles refuse message on the proposer side.
+	private void handleRefuseMessage(RefuseMessage p_refuseMessage){
+
+		m_failCheck.checkFailure(FailureType.AFTERSENDVOTE);
+
+		int moveNum = p_refuseMessage.getMoveNum();
+		PaxosMoveState moveState = getMoveState(moveNum);
+
+		float ballotID = p_refuseMessage.getBallotID();
+
+		if (ballotID == moveState.getProposedBallot()){
+			moveState.setRefuseMessageReceived(true);
+		}
+
+	}
+
+	//Handles the promise message on the proposer side.
+	private void handlePromiseMessage(PromiseMessage p_promiseMessage, String p_senderProcess){
+
+		m_failCheck.checkFailure(FailureType.AFTERSENDVOTE);
+
+		int moveNum = p_promiseMessage.getMoveNum();
+		PaxosMoveState moveState = getMoveState(moveNum);
+
+		float ballotID = p_promiseMessage.getBallotID();
+
+		if (ballotID == moveState.getProposedBallot()){
+			List<PromiseMessage> promiseMessageList = moveState.getPromiseMessageList();
+
+			promiseMessageList.add(p_promiseMessage);
+		}
+
+	}
+
+	//Handles the accept message on the acceptor side.
+	private void handleAcceptMessage(AcceptMessage p_acceptMessage, String p_senderProcess){
+		int moveNum = p_acceptMessage.getMoveNum();
+		PaxosMoveState moveState = getMoveState(moveNum);
+
+		float ballotID = p_acceptMessage.getBallotID();
+		PaxosMove move = p_acceptMessage.getMove();
+		int playerNum = p_acceptMessage.getPlayerNum();
+
+		if (ballotID >= moveState.getMaxBallotSeen()){
+			moveState.setAcceptedMove(move);
+			moveState.setAcceptedBallot(ballotID);
+			moveState.setMaxBallotSeen(ballotID);
+			moveState.setLastAcceptedPlayer(playerNum);
+
+			AckMessage acceptAckMessage = new AckMessage(moveNum, m_playerNum, ballotID);
+			m_gcl.sendMsg(acceptAckMessage, p_senderProcess);
+		}
+
+		else{
+			RejectMessage rejectMessage = new RejectMessage(moveNum, m_playerNum, ballotID);
+			m_gcl.sendMsg(rejectMessage, p_senderProcess);
+		}
+	}
+
+	//Handles the acceptAck message on the proposer side.
+	private void handleAcceptAckMessage(AckMessage p_acceptAckMessage, String p_senderProcess){
+		int moveNum = p_acceptAckMessage.getMoveNum();
+		PaxosMoveState moveState = getMoveState(moveNum);
+
+		float ballotID = p_acceptAckMessage.getBallotID();
+
+		if (ballotID == moveState.getProposedBallot()){
+			List<AckMessage> m_acceptMessageList = moveState.getAcceptAckMessageList();
+
+			m_acceptMessageList.add(p_acceptAckMessage);
+		}
+	}
+
+	//Handles the reject message on the proposer side.
+	private void handleRejectMessage(RejectMessage p_rejectMessage){
+		int moveNum = p_rejectMessage.getMoveNum();
+		PaxosMoveState moveState = getMoveState(moveNum);
+
+		float ballotID = p_rejectMessage.getBallotID();
+
+		if (ballotID == moveState.getProposedBallot()){
+			moveState.setRejectMessageReceived(true);
+		}
+	}
+
+	//Handles the confirm message on the acceptor side and installs the next move.
+	private void handleConfirmMessage(ConfirmMessage p_confirmMessage){
+		int moveNum = p_confirmMessage.getMoveNum();
+		int playerNum = p_confirmMessage.getPlayerNum();
+		PaxosMove confirmedMove = p_confirmMessage.getConfirmedMove();
+
+		DecidedMove decidedMove = new DecidedMove(playerNum, confirmedMove);
+		m_deliveryMap.put(moveNum, decidedMove);
+	}
+
+	//Generates a random ballotID based on the current moveNum from a U(0,1) distribution, rounded to 2 decimal places. I.e. if p_moveNum = 2, then this will output 2.31, 2.93, etc.
+	private float generateBallotID(Integer p_moveNum){
+		Random rand = new Random();
+		float fractional = rand.nextFloat();
+		return p_moveNum + fractional;
+	}
+
+	//Return the move state associated with a move number, and creates it if it doesn't exist.
+	private PaxosMoveState getMoveState(int p_moveNum){
+		
+		PaxosMoveState moveState = m_moveStateMap.get(p_moveNum);
+
+		if (moveState != null){
+			return moveState;
+		}
+
+		else{
+			m_moveStateMap.put(p_moveNum, new PaxosMoveState());
+			return m_moveStateMap.get(p_moveNum);
+		}
+	}
+
+	//Returns the previously accepted move with the highest ballot ID from the promise messages received. Returns null if there were no previous moves accepted.
+	private PaxosMove getChosenMove(List<PromiseMessage> p_promiseSet){
+		PaxosMove chosenMove = null;
+		float maxBallot = -1;
+
+		for (PromiseMessage promiseMessage: p_promiseSet){
+			float acceptedBallot = promiseMessage.getAcceptedBallot();
+			PaxosMove acceptedMove = promiseMessage.getAcceptedMove();
+
+			if (acceptedMove != null && acceptedBallot > maxBallot){
+				chosenMove = acceptedMove;
+				maxBallot = acceptedBallot;
+			}
+		} 
+
+		return chosenMove;
+	}
+
+	//Returns the last chosen player from promise messages, i.e. the player that proposed the highest ballot ID.
+	private int getChosenPlayer(List<PromiseMessage> p_promiseSet){
+		int chosenPlayer = -1;
+		float maxBallot = -1;
+
+		for (PromiseMessage promiseMessage: p_promiseSet){
+			float acceptedBallot = promiseMessage.getAcceptedBallot();
+			PaxosMove acceptedMove = promiseMessage.getAcceptedMove();
+
+			if (acceptedMove != null && acceptedBallot > maxBallot){
+				chosenPlayer = promiseMessage.getLastAcceptedPlayer(); // Get from promise
+				maxBallot = acceptedBallot;
+			}
+		} 
+
+		return chosenPlayer;
+	}
+
 }
 

@@ -2,7 +2,7 @@
 
 #TODO set this to where your code and jar file root dir is
 BASEDIR=$HOME/COMP512/a2/comp512p2
-
+BINDIR=$BASEDIR/bin
 #TODO update your group number here in place of XX
 group=26
 
@@ -12,21 +12,22 @@ gameid=game-$group-99
 
 #TODO edit these entries to put the name of the server that you are using and the associated ports.
 # Remember to start the script from this host
-export autotesthost=tr-open-36.cs.mcgill.ca
+export autotesthost=DESKTOP-2H5UHPN
 # player1 -> process 1, player 2 -> process 2, etc .. add more depending on how many players are playing.
 # Script automatically counts the variables to figure out the number of players.
+
 export process1=${autotesthost}:401$group
-#export process2=${autotesthost}:402$group
-#export process3=${autotesthost}:403$group
-#export process4=${autotesthost}:404$group
-#export process5=${autotesthost}:405$group
+export process2=${autotesthost}:402$group
+export process3=${autotesthost}:403$group
+export process4=${autotesthost}:404$group
+export process5=${autotesthost}:405$group
 #export process6=${autotesthost}:406$group
 #export process7=${autotesthost}:407$group
 #export process8=${autotesthost}:408$group
 #export process9=${autotesthost}:409$group
 
 #TODO update these values as needed
-maxmoves=10 interval=100 randseed=xxxxxxxxx
+maxmoves=50 interval=1000 randseed=xxxxxxxxx
 #TODO IF (and only if) you want to simulate failures, enable this for corresponding player numbers.
 #export failmode_N=RECEIVEPROPOSE
 #export failmode_N=AFTERSENDVOTE
@@ -34,7 +35,6 @@ maxmoves=10 interval=100 randseed=xxxxxxxxx
 #export failmode_N=AFTERBECOMINGLEADER
 #export failmode_N=AFTERVALUEACCEPT
 #For example this enabled failmode AFTERBECOMINGLEADER for player/process 2 (only one failmode can be set per process). It is important to have the export.
-export failmode_2=AFTERBECOMINGLEADER
 
 # Check if this script is being exectuted on the correct server.
 if [[ $autotesthost != $(hostname) ]]
@@ -62,7 +62,7 @@ then
 fi
 
 # set your classpath to include the gcl tar files and the parent path to the comp512st directory.
-export CLASSPATH=$BASEDIR/comp512p2.jar:$BASEDIR
+export CLASSPATH=$BASEDIR/comp512p2.jar:$BINDIR
 
 # Build the process group string.
 export processgroup=$(env | grep '^process[1-9]=' | sort | sed -e 's/.*=//')
