@@ -52,7 +52,7 @@ public class Paxos
 
 	private final int m_numProcesses; //Number of total player processes.
 	private final double m_majorityNum; //Number of processed required to meet majority.
-	private final long m_maxTimeout = 1000; //1 seconds.
+	private final long m_maxTimeout = 500; //1 seconds.
 	private int m_proposalSlot; //Next move to propose.
 	private int m_deliverSlot; //Next move to deliver.
 
@@ -93,7 +93,7 @@ public class Paxos
 		startProposerThread();
 	}
 
-	public void broadcastTOMsg(Object val)
+	public void broadcastTOMsg(Object val) throws InterruptedException
 	{
 		Object[] moveArr = (Object[]) val; 
 
@@ -103,6 +103,12 @@ public class Paxos
 		if (playerNum == m_playerNum){
 			m_moveQueue.add(nextMove);
 		}
+
+		while (!m_moveQueue.isEmpty()){
+			Thread.sleep(50);
+		}
+
+		return;
 	}
 
 
@@ -129,20 +135,13 @@ public class Paxos
 	}
 
 	// Add any of your own shutdown code into this method.
-	public void shutdownPaxos()
-	{
+	public void shutdownPaxos(){
+		m_logger.info("Shutdown initiated - stopping new proposals");
+		
 		m_running = false;
-
-        if (m_listenerThread != null) {
-            m_listenerThread.interrupt();
-        }
-        if (m_proposerThread != null) {
-            m_proposerThread.interrupt();
-        }
-
-		ShutdownMessage shutdownMessage = new ShutdownMessage(m_playerNum);
-		m_gcl.broadcastMsg(shutdownMessage);
+		
 		m_gcl.shutdownGCL();
+		m_logger.info("Paxos shutdown complete");
 	}
 
 	private void startListenerThread(){
@@ -173,9 +172,6 @@ public class Paxos
 					else if (msg instanceof ConfirmMessage) {
 						handleConfirmMessage((ConfirmMessage) msg);
 					}
-					else if (msg instanceof ShutdownMessage){
-						shutdownPaxos();;
-					}
 				}
 			}
 			catch (InterruptedException e){
@@ -188,42 +184,46 @@ public class Paxos
 	}
 
 	private void startProposerThread() throws InterruptedException{
-		Thread proposerThread= new Thread(() -> {
+		Thread proposerThread = new Thread(() -> {
 			try{
-				while (m_running){
-
+				while (m_running || !m_moveQueue.isEmpty()){
+					
 					if (!(m_moveQueue.isEmpty())){
 						PaxosMove nextMove = m_moveQueue.peek();
-
+						
 						m_logger.info("Attempting to propose move: " + nextMove + " from player " + m_playerNum);
-
+						
 						int slotNum = m_proposalSlot;
-
+						
 						if (m_deliveryMap.get(slotNum) != null){
 							m_logger.info("Slot " + slotNum + " has already been decided.");
 							m_proposalSlot += 1;
 							continue;
 						}
-
+						
 						if (runPaxos(nextMove, slotNum)){
-							m_logger.info("Slot " + slotNum + "has been decided by process " + m_playerNum);
+							m_logger.info("Slot " + slotNum + " has been decided by process " + m_playerNum);
 							m_proposalSlot += 1;
-							m_moveQueue.poll();
 						}
 						else{
 							Thread.sleep(50);
 						}
 					}
 					else{
-						Thread.sleep(100);
+						// Only sleep if we're still running, otherwise exit immediately
+						if (m_running) {
+							Thread.sleep(100);
+						}
 					}
 				}
+				m_logger.info("Proposer thread exiting cleanly");
 			}
 			catch(InterruptedException e){
+				m_logger.info("Proposer thread interrupted");
 				Thread.currentThread().interrupt();
 			}
 		});
-
+		
 		m_proposerThread = proposerThread;
 		proposerThread.start();
 	}
@@ -280,6 +280,8 @@ public class Paxos
 					List<AckMessage> ackList = moveState.getAcceptAckMessageList();
 
 					if (ackList.size() >= m_majorityNum) {
+
+						m_moveQueue.poll();
 
 						m_failCheck.checkFailure(FailureType.AFTERVALUEACCEPT);
 
@@ -425,7 +427,8 @@ public class Paxos
 	private float generateBallotID(Integer p_moveNum){
 		Random rand = new Random();
 		float fractional = rand.nextFloat();
-		return p_moveNum + fractional;
+		float offset = (0.001f) * m_playerNum; //Slight offset to prevent duplicate ballotID's.
+		return p_moveNum + fractional + offset;
 	}
 
 	//Return the move state associated with a move number, and creates it if it doesn't exist.
